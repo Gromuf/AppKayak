@@ -1,6 +1,12 @@
+import 'dart:io';
+
+import 'package:excel/excel.dart' hide Border;
 import 'package:flutter/material.dart';
-import 'package:share_plus/share_plus.dart';
 import 'package:intl/intl.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:share_plus/share_plus.dart';
 import '../models/athlete_run.dart';
 import 'create_session_screen.dart';
 
@@ -49,34 +55,31 @@ class SummaryScreen extends StatelessWidget {
     return total;
   }
 
-  String _generateGoogleDocHtml(int maxRunsCount) {
-    String currentDate = DateFormat('dd/MM/yyyy à HH:mm').format(DateTime.now());
-    int concentrationTotalPortes = _calculateTotalConcentrationPortes();
+  // ---------------------------------------------------------------------------
+  // DONNÉES COMMUNES À L'EXPORT (PDF + Excel)
+  // ---------------------------------------------------------------------------
 
-    StringBuffer html = StringBuffer();
-    html.write("<h1>$title</h1>");
-    html.write("<p><b>Date :</b> $currentDate</p>");
-    html.write("<p><b>Embarcation :</b> $embarcation ${hasPortes ? "($portesCount portes)" : ""}</p>");
-    if (isConcentration) {
-      html.write("<p><b>Type de séance :</b> Concentration (Pas de +$concentrationStep) — <b>Total portes cumulées par run :</b> $concentrationTotalPortes portes</p>");
-    }
-    html.write("<br>");
+  String get _embarcationLabel =>
+      '$embarcation${hasPortes ? " ($portesCount portes)" : ""}';
 
-    html.write("<table border='1' cellspacing='0' cellpadding='6' style='border-collapse: collapse; border-color: #ccc;'>");
-    html.write("<tr style='background-color: #f2f2f2;'>");
-    html.write("<th>Athlète</th>");
+  String get _concentrationLabel =>
+      'Concentration (pas de +$concentrationStep) - ${_calculateTotalConcentrationPortes()} portes cumulées par run';
+
+  List<String> _buildHeaders(int maxRunsCount) {
+    final headers = <String>['Athlète'];
     for (int i = 0; i < maxRunsCount; i++) {
-      html.write("<th>Temps ${i + 1}</th>");
+      headers.add('Temps ${i + 1}');
     }
-    if (hasPortes) {
-      html.write("<th>Pénalités moy.</th>");
-    }
-    if (isConcentration) {
-      html.write("<th>Portes cumulées / run</th>");
-    }
-    html.write("<th>Best</th>");
-    html.write("<th>Moyenne</th>");
-    html.write("</tr>");
+    if (hasPortes) headers.add('Pénalités moy.');
+    if (isConcentration) headers.add('Portes cumulées / run');
+    headers.add('Best');
+    headers.add('Moyenne');
+    return headers;
+  }
+
+  List<List<String>> _buildRows(int maxRunsCount) {
+    final rows = <List<String>>[];
+    final concentrationTotal = _calculateTotalConcentrationPortes();
 
     athleteRuns.forEach((athlete, runs) {
       int? bestTime;
@@ -89,39 +92,144 @@ class SummaryScreen extends StatelessWidget {
         avgPenalties = runs.map((r) => r.penaltySec).reduce((a, b) => a + b) / runs.length;
       }
 
-      html.write("<tr>");
-      html.write("<td><b>$athlete</b></td>");
+      final row = <String>[athlete];
 
       for (int i = 0; i < maxRunsCount; i++) {
         if (i < runs.length) {
           final run = runs[i];
-          String cellText = run.penaltySec > 0
-              ? "${_formatTime(run.rawTimeMs)} &rarr; ${_formatTime(run.totalMs)} (+${run.penaltySec}s)"
-              : _formatTime(run.rawTimeMs);
-          html.write("<td style='font-family: monospace;'>$cellText</td>");
+          row.add(run.penaltySec > 0
+              ? "${_formatTime(run.rawTimeMs)} -> ${_formatTime(run.totalMs)} (+${run.penaltySec}s)"
+              : _formatTime(run.rawTimeMs));
         } else {
-          html.write("<td style='text-align: center;'>-</td>");
+          row.add('-');
         }
       }
 
       if (hasPortes) {
-        String penText = avgPenalties != null ? "${avgPenalties.toStringAsFixed(1)} s" : "-";
-        html.write("<td style='font-family: monospace; text-align: center; color: #d9534f;'>$penText</td>");
+        row.add(avgPenalties != null ? "${avgPenalties.toStringAsFixed(1)} s" : "-");
       }
-
       if (isConcentration) {
-        html.write("<td style='text-align: center; font-weight: bold;'>$concentrationTotalPortes</td>");
+        row.add('$concentrationTotal');
       }
+      row.add(bestTime != null ? _formatTime(bestTime) : "-");
+      row.add(avgTime != null ? _formatTime(avgTime) : "-");
 
-      String bestText = bestTime != null ? _formatTime(bestTime) : "-";
-      String avgText = avgTime != null ? _formatTime(avgTime) : "-";
-      html.write("<td style='font-family: monospace; font-weight: bold; color: #5cb85c;'>$bestText</td>");
-      html.write("<td style='font-family: monospace; font-weight: bold;'>$avgText</td>");
-      html.write("</tr>");
+      rows.add(row);
     });
 
-    html.write("</table>");
-    return html.toString();
+    return rows;
+  }
+
+  String _fileBaseName() {
+    final safeTitle = title.replaceAll(RegExp(r'[^\w\-]+'), '_');
+    final stamp = DateFormat('yyyyMMdd_HHmm').format(DateTime.now());
+    return '${safeTitle}_$stamp';
+  }
+
+  // ---------------------------------------------------------------------------
+  // EXPORT PDF
+  // ---------------------------------------------------------------------------
+
+  Future<void> _exportPdf(BuildContext context, int maxRunsCount) async {
+    try {
+      final currentDate = DateFormat('dd/MM/yyyy à HH:mm').format(DateTime.now());
+      final headers = _buildHeaders(maxRunsCount);
+      final rows = _buildRows(maxRunsCount);
+
+      final doc = pw.Document();
+      doc.addPage(
+        pw.MultiPage(
+          pageFormat: PdfPageFormat.a4.landscape,
+          margin: const pw.EdgeInsets.all(24),
+          build: (pw.Context ctx) => [
+            pw.Text(title, style: pw.TextStyle(fontSize: 22, fontWeight: pw.FontWeight.bold)),
+            pw.SizedBox(height: 6),
+            pw.Text('Date : $currentDate'),
+            pw.Text('Embarcation : $_embarcationLabel'),
+            if (isConcentration) pw.Text('Type de séance : $_concentrationLabel'),
+            pw.SizedBox(height: 14),
+            pw.TableHelper.fromTextArray(
+              headers: headers,
+              data: rows,
+              headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10),
+              cellStyle: const pw.TextStyle(fontSize: 9),
+              headerDecoration: const pw.BoxDecoration(color: PdfColors.grey300),
+              cellAlignment: pw.Alignment.centerLeft,
+              cellPadding: const pw.EdgeInsets.all(5),
+            ),
+          ],
+        ),
+      );
+
+      final bytes = await doc.save();
+      final dir = await getTemporaryDirectory();
+      final file = File('${dir.path}/${_fileBaseName()}.pdf');
+      await file.writeAsBytes(bytes, flush: true);
+
+      await Share.shareXFiles(
+        [XFile(file.path, mimeType: 'application/pdf')],
+        subject: 'Résultats - $title',
+      );
+    } catch (e) {
+      _showError(context, e);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // EXPORT EXCEL (.xlsx) - s'ouvre dans Excel, Google Sheets, LibreOffice
+  // ---------------------------------------------------------------------------
+
+  Future<void> _exportExcel(BuildContext context, int maxRunsCount) async {
+    try {
+      final currentDate = DateFormat('dd/MM/yyyy à HH:mm').format(DateTime.now());
+      final headers = _buildHeaders(maxRunsCount);
+      final rows = _buildRows(maxRunsCount);
+
+      final excel = Excel.createExcel();
+      const sheetName = 'Resultats';
+      excel.rename(excel.getDefaultSheet()!, sheetName);
+      final sheet = excel[sheetName];
+
+      sheet.appendRow([TextCellValue(title)]);
+      sheet.appendRow([TextCellValue('Date : $currentDate')]);
+      sheet.appendRow([TextCellValue('Embarcation : $_embarcationLabel')]);
+      if (isConcentration) {
+        sheet.appendRow([TextCellValue('Type de séance : $_concentrationLabel')]);
+      }
+      sheet.appendRow([TextCellValue('')]);
+
+      sheet.appendRow(headers.map((h) => TextCellValue(h)).toList());
+      for (final row in rows) {
+        sheet.appendRow(row.map((c) => TextCellValue(c)).toList());
+      }
+
+      final bytes = excel.save();
+      if (bytes == null) throw Exception('Impossible de générer le fichier Excel');
+
+      final dir = await getTemporaryDirectory();
+      final file = File('${dir.path}/${_fileBaseName()}.xlsx');
+      await file.writeAsBytes(bytes, flush: true);
+
+      await Share.shareXFiles(
+        [
+          XFile(
+            file.path,
+            mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          ),
+        ],
+        subject: 'Résultats - $title',
+      );
+    } catch (e) {
+      _showError(context, e);
+    }
+  }
+
+  void _showError(BuildContext context, Object e) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Erreur d\'export : $e')),
+      );
+    }
   }
 
   @override
@@ -297,21 +405,34 @@ class SummaryScreen extends StatelessWidget {
             padding: const EdgeInsets.all(16.0),
             child: Column(
               children: [
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.blue[700],
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
+                Row(
+                  children: [
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.blue[700],
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                        ),
+                        onPressed: () => _exportPdf(context, maxRunsCount),
+                        icon: const Icon(Icons.picture_as_pdf),
+                        label: const Text('PDF', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                      ),
                     ),
-                    onPressed: () {
-                      final htmlContent = _generateGoogleDocHtml(maxRunsCount);
-                      Share.share(htmlContent, subject: 'Résultats - $title');
-                    },
-                    icon: const Icon(Icons.description),
-                    label: const Text('Exporter vers Google Doc', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                  ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green[700],
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                        ),
+                        onPressed: () => _exportExcel(context, maxRunsCount),
+                        icon: const Icon(Icons.table_chart),
+                        label: const Text('Excel', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                      ),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 10),
                 SizedBox(
