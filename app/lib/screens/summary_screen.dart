@@ -1,6 +1,8 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:excel/excel.dart' hide Border;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
@@ -161,14 +163,10 @@ class SummaryScreen extends StatelessWidget {
         ),
       );
 
-      final bytes = await doc.save();
-      final dir = await getTemporaryDirectory();
-      final file = File('${dir.path}/${_fileBaseName()}.pdf');
-      await file.writeAsBytes(bytes, flush: true);
-
-      await Share.shareXFiles(
-        [XFile(file.path, mimeType: 'application/pdf')],
-        subject: 'Résultats - $title',
+      await _shareBytes(
+        await doc.save(),
+        '${_fileBaseName()}.pdf',
+        'application/pdf',
       );
     } catch (e) {
       _showError(context, e);
@@ -206,22 +204,32 @@ class SummaryScreen extends StatelessWidget {
       final bytes = excel.save();
       if (bytes == null) throw Exception('Impossible de générer le fichier Excel');
 
-      final dir = await getTemporaryDirectory();
-      final file = File('${dir.path}/${_fileBaseName()}.xlsx');
-      await file.writeAsBytes(bytes, flush: true);
-
-      await Share.shareXFiles(
-        [
-          XFile(
-            file.path,
-            mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-          ),
-        ],
-        subject: 'Résultats - $title',
+      await _shareBytes(
+        Uint8List.fromList(bytes),
+        '${_fileBaseName()}.xlsx',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       );
     } catch (e) {
       _showError(context, e);
     }
+  }
+
+  // Partage un fichier : en mémoire sur le web (iOS Safari), via un fichier temporaire sur mobile
+  Future<void> _shareBytes(Uint8List bytes, String fileName, String mimeType) async {
+    final XFile xfile;
+    if (kIsWeb) {
+      xfile = XFile.fromData(bytes, mimeType: mimeType, name: fileName);
+    } else {
+      final dir = await getTemporaryDirectory();
+      final file = File('${dir.path}/$fileName');
+      await file.writeAsBytes(bytes, flush: true);
+      xfile = XFile(file.path, mimeType: mimeType);
+    }
+    await Share.shareXFiles(
+      [xfile],
+      subject: 'Résultats - $title',
+      fileNameOverrides: [fileName],
+    );
   }
 
   void _showError(BuildContext context, Object e) {
