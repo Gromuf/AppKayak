@@ -28,6 +28,7 @@ class ChronoSessionScreen extends StatefulWidget {
 }
 
 class _ChronoSessionScreenState extends State<ChronoSessionScreen> {
+  late List<String> _order; // ordre d'affichage (modifiable par drag & drop)
   late Map<String, int> _currentTimes;
   late Map<String, bool> _isRunning;
   late Map<String, bool> _isFinished;
@@ -39,6 +40,7 @@ class _ChronoSessionScreenState extends State<ChronoSessionScreen> {
   @override
   void initState() {
     super.initState();
+    _order = List<String>.from(widget.participants);
     _currentTimes = {for (var p in widget.participants) p: 0};
     _isRunning = {for (var p in widget.participants) p: false};
     _isFinished = {for (var p in widget.participants) p: false};
@@ -47,7 +49,7 @@ class _ChronoSessionScreenState extends State<ChronoSessionScreen> {
 
     _timer = Timer.periodic(const Duration(milliseconds: 100), (timer) {
       setState(() {
-        for (var p in widget.participants) {
+        for (var p in _order) {
           if (_isRunning[p] == true) {
             _currentTimes[p] = _currentTimes[p]! + 100;
           }
@@ -85,6 +87,27 @@ class _ChronoSessionScreenState extends State<ChronoSessionScreen> {
     });
   }
 
+  // Réorganise les athlètes (drag & drop) et répercute l'ordre sur le récapitulatif / export
+  void _onReorder(int oldIndex, int newIndex) {
+    setState(() {
+      if (newIndex > oldIndex) newIndex -= 1;
+      final item = _order.removeAt(oldIndex);
+      _order.insert(newIndex, item);
+      _athleteRuns = {for (var p in _order) p: _athleteRuns[p]!};
+    });
+  }
+
+  // Lance d'un coup tous les chronos à l'arrêt (ceux déjà en cours ou terminés non enregistrés sont ignorés)
+  void _startAll() {
+    setState(() {
+      for (final p in _order) {
+        if (_isRunning[p] != true && _isFinished[p] != true) {
+          _isRunning[p] = true;
+        }
+      }
+    });
+  }
+
   void _deleteCurrentChrono(String participant) {
     setState(() {
       _currentTimes[participant] = 0;
@@ -110,11 +133,31 @@ class _ChronoSessionScreenState extends State<ChronoSessionScreen> {
               style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.grey),
             ),
           ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+            child: SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.green,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                ),
+                onPressed: _order.any((p) => _isRunning[p] != true && _isFinished[p] != true)
+                    ? _startAll
+                    : null,
+                icon: const Icon(Icons.play_arrow),
+                label: const Text('Tout démarrer', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              ),
+            ),
+          ),
           Expanded(
-            child: ListView.builder(
-              itemCount: widget.participants.length,
+            child: ReorderableListView.builder(
+              buildDefaultDragHandles: false,
+              onReorder: _onReorder,
+              itemCount: _order.length,
               itemBuilder: (context, index) {
-                final participant = widget.participants[index];
+                final participant = _order[index];
                 final isRunning = _isRunning[participant] ?? false;
                 final isFinished = _isFinished[participant] ?? false;
                 final penaltySec = _currentPenalties[participant] ?? 0;
@@ -123,6 +166,7 @@ class _ChronoSessionScreenState extends State<ChronoSessionScreen> {
                 final totalMilliseconds = _currentTimes[participant]! + (penaltySec * 1000);
 
                 return Card(
+                  key: ValueKey(participant),
                   margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   elevation: 2,
                   child: Padding(
@@ -134,6 +178,19 @@ class _ChronoSessionScreenState extends State<ChronoSessionScreen> {
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
+                            ReorderableDragStartListener(
+                              index: index,
+                              child: Container(
+                                width: 48,
+                                height: 56,
+                                margin: const EdgeInsets.only(right: 10),
+                                decoration: BoxDecoration(
+                                  color: Colors.grey.shade200,
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: const Icon(Icons.drag_indicator, size: 32, color: Colors.black54),
+                              ),
+                            ),
                             Expanded(
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
